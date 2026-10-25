@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.4
+
+- Click a new or existing highlight to add, edit, or clear a multiline comment.
+- Stage comments with Apply / Ctrl+Enter, or save the active comment directly with Ctrl+S.
+- Store comments in standard PDF annotation contents, preserving existing highlight appearance.
+- Support comment undo/redo, backup recovery, and grouped comments on cross-page highlights.
+- Keep PDF canvases unchanged while editing and saving comments.
+
+## 1.2.3
+
+- Add **Highlight** to the PDF text selection context menu, with Chinese translations.
+- Stage yellow highlights in memory and save standard PDF annotations with Ctrl+S / Cmd+S.
+- Render highlights without reloading the PDF, including after saving.
+- Integrate native dirty state, undo/redo, Save As, revert, and hot-exit backups.
+- Support selections across lines and pages, at different zoom levels and rotations.
+- Detect changes on disk before saving and report write failures.
+- Require VS Code 1.72 or newer for native webview context menus.
+
 ## 1.2.2 (2022/12/23)
 
 - Fix about rendering Unicode characters

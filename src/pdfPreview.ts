@@ -1,6 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Disposable } from './disposable';
+import { randomBytes } from 'crypto';
+import { PdfDocument } from './pdfDocument';
+import { isHighlightSelection } from './highlights';
 
 function escapeAttribute(value: string | vscode.Uri): string {
   return value.toString().replace(/"/g, '&quot;');
@@ -9,14 +12,17 @@ function escapeAttribute(value: string | vscode.Uri): string {
 type PreviewState = 'Disposed' | 'Visible' | 'Active';
 
 export class PdfPreview extends Disposable {
+  public readonly id = randomBytes(16).toString('hex');
   private _previewState: PreviewState = 'Visible';
+  private readonly resource: vscode.Uri;
 
   constructor(
     private readonly extensionRoot: vscode.Uri,
-    private readonly resource: vscode.Uri,
+    private readonly document: PdfDocument,
     private readonly webviewEditor: vscode.WebviewPanel
   ) {
     super();
+    const resource = (this.resource = document.uri);
     const resourceRoot = resource.with({
       path: resource.path.replace(/\/[^/]+?\.\w+$/, '/'),
     });
@@ -27,8 +33,81 @@ export class PdfPreview extends Disposable {
     };
 
     this._register(
-      webviewEditor.webview.onDidReceiveMessage((message) => {
+      webviewEditor.webview.onDidReceiveMessage(async (message) => {
+        if (!message || typeof message.type !== 'string') {
+          return;
+        }
         switch (message.type) {
+          case 'update-comment': {
+            try {
+              document.updateComment(
+                message.sourceHash,
+                message.highlightId,
+                message.comment,
+                message.expectedComment
+              );
+              webviewEditor.webview.postMessage({
+                type: 'comment-updated',
+                requestId: message.requestId,
+              });
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              webviewEditor.webview.postMessage({
+                type: 'comment-failed',
+                requestId: message.requestId,
+                error: detail,
+              });
+            }
+            break;
+          }
+          case 'ready': {
+            webviewEditor.webview.postMessage(document.getState(true));
+            break;
+          }
+          case 'save-document': {
+            try {
+              await vscode.commands.executeCommand(
+                message.saveAs
+                  ? 'workbench.action.files.saveAs'
+                  : 'workbench.action.files.save',
+                resource
+              );
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              vscode.window.showErrorMessage(`Could not save PDF: ${detail}`);
+            }
+            break;
+          }
+          case 'undo':
+          case 'redo': {
+            await vscode.commands.executeCommand(message.type);
+            break;
+          }
+          case 'add-highlight': {
+            try {
+              if (!isHighlightSelection(message.selection)) {
+                throw new Error('Invalid PDF text selection.');
+              }
+              document.addHighlight(message.selection);
+              webviewEditor.webview.postMessage({ type: 'highlight-added' });
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              vscode.window.showErrorMessage(
+                `Could not add PDF highlight: ${detail}`
+              );
+              webviewEditor.webview.postMessage({ type: 'highlight-failed' });
+            }
+            break;
+          }
+          case 'highlight-error': {
+            vscode.window.showErrorMessage(
+              'Could not read the selected PDF text. Please select it again.'
+            );
+            break;
+          }
           case 'reopen-as-text': {
             vscode.commands.executeCommand(
               'vscode.openWith',
@@ -39,6 +118,12 @@ export class PdfPreview extends Disposable {
             break;
           }
         }
+      })
+    );
+
+    this._register(
+      document.onDidChangeContent((reload) => {
+        webviewEditor.webview.postMessage(document.getState(reload));
       })
     );
 
@@ -60,14 +145,16 @@ export class PdfPreview extends Disposable {
     this._register(
       watcher.onDidChange((e) => {
         if (e.toString() === this.resource.toString()) {
-          this.reload();
+          document
+            .refreshFromDisk()
+            .catch((error) => console.error('Could not refresh PDF', error));
         }
       })
     );
     this._register(
       watcher.onDidDelete((e) => {
         if (e.toString() === this.resource.toString()) {
-          this.webviewEditor.dispose();
+          if (!document.isDirty) this.webviewEditor.dispose();
         }
       })
     );
@@ -76,9 +163,12 @@ export class PdfPreview extends Disposable {
     this.update();
   }
 
-  private reload(): void {
-    if (this._previewState !== 'Disposed') {
-      this.webviewEditor.webview.postMessage({ type: 'reload' });
+  public highlightSelection(selectionId: number): void {
+    if (!this.isDisposed) {
+      this.webviewEditor.webview.postMessage({
+        type: 'highlight-selection',
+        selectionId,
+      });
     }
   }
 
@@ -105,7 +195,14 @@ export class PdfPreview extends Disposable {
 
     const config = vscode.workspace.getConfiguration('pdf-preview');
     const settings = {
+      language: vscode.env && vscode.env.language,
+      previewId: this.id,
       cMapUrl: resolveAsUri('lib', 'web', 'cmaps/').toString(),
+      standardFontDataUrl: resolveAsUri(
+        'lib',
+        'web',
+        'standard_fonts/'
+      ).toString(),
       path: docPath.toString(),
       defaults: {
         cursor: config.get('default.cursor') as string,
@@ -123,7 +220,7 @@ export class PdfPreview extends Disposable {
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="google" content="notranslate">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src ${cspSource}; script-src 'unsafe-inline' ${cspSource}; style-src 'unsafe-inline' ${cspSource}; img-src blob: data: ${cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src ${cspSource}; script-src 'unsafe-inline' ${cspSource}; style-src 'unsafe-inline' ${cspSource}; img-src blob: data: ${cspSource}; font-src blob: data: ${cspSource};">
 <meta id="pdf-preview-config" data-config="${escapeAttribute(
       JSON.stringify(settings)
     )}">
@@ -139,6 +236,8 @@ export class PdfPreview extends Disposable {
 <script src="${resolveAsUri('lib', 'build', 'pdf.js')}"></script>
 <script src="${resolveAsUri('lib', 'build', 'pdf.worker.js')}"></script>
 <script src="${resolveAsUri('lib', 'web', 'viewer.js')}"></script>
+<script src="${resolveAsUri('lib', 'comments.js')}"></script>
+<script src="${resolveAsUri('lib', 'highlights.js')}"></script>
 <script src="${resolveAsUri('lib', 'main.js')}"></script>
 </head>`;
 
